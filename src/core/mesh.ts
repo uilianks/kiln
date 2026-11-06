@@ -1,5 +1,7 @@
-// A mesh is a list of flat, convex, planar polygons with a material key each. Low-poly assets
-// are flat-shaded, so faces never share normals and polygon soup is the natural representation.
+// A mesh is a list of flat, convex, planar polygons with a material key each (subdiv() output may be a few mm
+// off-plane quads; every consumer fan-triangulates and uses Newell normals): polygon soup, which every
+// operation (transforms, mirrors, stamps, jitter, posing) works on. Shading is data on the faces
+// (`smooth`); welded corner normals are computed from the final geometry (shade.ts, docs/adr/0001).
 import { KilnError } from "./errors.ts";
 import { type M, type V3, apply, det, dot, hash, norm, rng } from "./util.ts";
 
@@ -8,6 +10,8 @@ export interface Face {
   mat: string;
   /** Animated part this face belongs to (none = the model's static body). */
   part?: string;
+  /** Crease angle in degrees: shade smooth across edges up to this angle (absent or 0 = flat). */
+  smooth?: number;
 }
 
 /** An animatable part: a named node that rotates / moves / scales about its pivot. */

@@ -135,7 +135,7 @@ function ico(detail: number): { pts: V3[]; tris: [number, number, number][] } {
 }
 
 export function sphere(r: number, detail: number, mat: string): Face[] {
-  if (!(detail >= 0 && detail <= 4)) throw new KilnError("detail must be 0..4");
+  if (!(detail >= 0 && detail <= 6)) throw new KilnError("detail must be 0..6");
   const { pts, tris } = ico(detail);
   return tris.map(([a, b, c]) => {
     const v: V3[] = [scl(pts[a], r), scl(pts[b], r), scl(pts[c], r)];

@@ -24,6 +24,8 @@ const USAGE = `kiln — low-poly and voxel 3D game assets as code
       With --frames: --yaw-to / --pitch-to / --zoom-to make an eased camera move instead of a turntable;
       --audio FILE muxes a soundtrack into the MP4. --clip NAME plays an animate() clip (looping over the frames;
       --clip-frame N for a still); --still-camera with --frames keeps the camera fixed.
+      --look studio: look-dev lighting (studio HDRI, soft key, contact AO) to judge shapes and shading.
+      --preset game: a fixed-angle game camera (yaw 45, pitch 35, 25° vertical fov, 25.8 m away).
   kiln info   <models.kx.js> <name>
       Dimensions, triangle count, materials and build steps.
   kiln serve  <models.kx.js> [--port 4340] [--out DIR | --no-out]
@@ -33,7 +35,7 @@ const USAGE = `kiln — low-poly and voxel 3D game assets as code
 Model files may be .js or .ts. Default out dir: <model file dir>/out.`;
 
 interface Args { cmd?: string; file?: string; rest: string[]; out?: string | false; only?: string[]; preview?: boolean; turntable?: boolean; stl?: boolean; rig?: boolean;
-  port?: number; size?: [number, number]; yaw?: number; pitch?: number; samples?: number; ground?: boolean; transparent?: boolean; frames?: number; mood?: "day" | "night"; fog?: number; lens?: number; zoom?: number; focus?: [number, number, number]; yawTo?: number; pitchTo?: number; zoomTo?: number; audio?: string; bloom?: number; clip?: string; still?: boolean; clipFrame?: number }
+  port?: number; size?: [number, number]; yaw?: number; pitch?: number; samples?: number; ground?: boolean; transparent?: boolean; frames?: number; mood?: "day" | "night"; fog?: number; lens?: number; zoom?: number; focus?: [number, number, number]; yawTo?: number; pitchTo?: number; zoomTo?: number; audio?: string; bloom?: number; clip?: string; still?: boolean; clipFrame?: number; look?: "studio"; preset?: "game" }
 
 function parse(argv: string[]): Args {
   const a: Args = { rest: [] };
@@ -73,6 +75,15 @@ function parse(argv: string[]): Args {
     else if (v === "--clip") a.clip = val();
     else if (v === "--clip-frame") a.clipFrame = Number(val());
     else if (v === "--still-camera") a.still = true;
+    else if (v === "--look") {
+      const l = val();
+      if (l !== "studio") throw new KilnError("--look must be studio");
+      a.look = l;
+    } else if (v === "--preset") {
+      const p = val();
+      if (p !== "game") throw new KilnError("--preset must be game");
+      a.preset = p;
+    }
     else if (v === "--focus") {
       const f = val().split(",").map(Number);
       if (f.length !== 3 || f.some((x) => !Number.isFinite(x))) throw new KilnError("--focus must be x,y,z (model coordinates)");
@@ -109,11 +120,11 @@ export async function main(argv: string[]): Promise<number> {
         const pk = p.packs.find((k) => k.name === name);
         const clip = a.clip ? p.clips.find((c) => c.model === name && c.name === a.clip) : undefined;
         if (a.clip && !clip) throw new KilnError(`model '${name}' has no clip '${a.clip}'${didYouMean(a.clip, p.clips.filter((c) => c.model === name).map((c) => c.name))}`);
-        const bytes = pk ? glb(packLayout(p, pk).models) : (() => { const b = p.build(name); return glb([{ name, faces: b.faces, pal: b.pal, lights: b.lights, joints: b.joints, clips: clip ? [clip] : [] }]); })();
+        const bytes = pk ? glb(packLayout(p, pk).models) : (() => { const b = p.build(name); return glb([{ name, faces: b.faces, pal: b.pal, lights: b.lights, joints: b.joints, clips: clip ? [clip] : [], ao: b.ao }]); })();
         const turn = (a.frames ?? 1) > 1;
         const out = typeof a.out === "string" ? resolve(a.out) : join(dirname(file), "out", "renders", name + (turn ? ".mp4" : ".png"));
         mkdirSync(dirname(out), { recursive: true });
-        const ro = { w: a.size?.[0], h: a.size?.[1], yaw: a.yaw, pitch: a.pitch, samples: a.samples, ground: a.ground, transparent: a.transparent, mood: a.mood, fog: a.fog, lens: a.lens, zoom: a.zoom, focus: a.focus, bloom: a.bloom, spin: !a.still,
+        const ro = { w: a.size?.[0], h: a.size?.[1], yaw: a.yaw, pitch: a.pitch, samples: a.samples, ground: a.ground, transparent: a.transparent, mood: a.mood, fog: a.fog, lens: a.lens, zoom: a.zoom, focus: a.focus, bloom: a.bloom, spin: !a.still, look: a.look, preset: a.preset,
           clip: clip ? { name: clip.name, fps: clip.fps, frames: clip.frames, frame: a.clipFrame ?? 0 } : undefined,
           move: a.yawTo !== undefined || a.pitchTo !== undefined || a.zoomTo !== undefined
             ? { yaw: a.yawTo ?? a.yaw ?? 35, pitch: a.pitchTo ?? a.pitch ?? 22, zoom: a.zoomTo ?? a.zoom ?? 1 } : undefined };

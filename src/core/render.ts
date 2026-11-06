@@ -1,7 +1,10 @@
-// A small flat-shading software rasterizer: perspective camera orbiting the model, z-buffer,
-// world-fixed key + fill light, hemispheric ambient, emissive glow, a ground grid with a cast
-// shadow, and 2x supersampling. It is the agent's eyes; Blender is the beauty renderer.
+// A small software rasterizer: perspective camera orbiting the model, z-buffer, world-fixed key + fill
+// light, hemispheric ambient, emissive glow, a ground grid with a cast shadow, and 2x supersampling.
+// Flat faces are lit per face; smooth faces per corner with the export's normals (Gouraud), times baked
+// AO; blended materials are drawn last, back to front. It is the agent's eyes; Blender is the beauty renderer.
+import type { AoOpts } from "./ao.ts";
 import { type Face, type Bounds, type Light, faceNormal, triangulate } from "./mesh.ts";
+import { type ShadedTri, needsShading, shade } from "./shade.ts";
 import { type Palette, boxUV, srgbToLinear } from "./palette.ts";
 import { type V3, add, cross, dot, len, norm, scl, sub } from "./util.ts";
 
@@ -16,6 +19,18 @@ export interface ViewOpts {
   fit?: Bounds;
   /** Scene lights: when present the view switches to night (dim moon, lights do the work). */
   lights?: Light[];
+  /** Baked ambient occlusion (the model's `ao`). */
+  ao?: AoOpts;
+}
+
+/** Shading is recomputed only when the face list changes (orbiting the viewer reuses it). */
+const shadeCache = new WeakMap<Face[], { ao?: AoOpts; tris: ShadedTri[] }>();
+function shaded(faces: Face[], ao?: AoOpts): ShadedTri[] {
+  const hit = shadeCache.get(faces);
+  if (hit && hit.ao === ao) return hit.tris;
+  const tris = shade(faces, ao);
+  shadeCache.set(faces, { ao, tris });
+  return tris;
 }
 
 /** Light reaching a face from punctual lights (flat: evaluated at the face center). */
@@ -104,7 +119,7 @@ export function renderView(faces: Face[], pal: Palette, b: Bounds, o: ViewOpts =
     for (let x = 0; x < W; x++) { const i = (y * W + x) * 3; img[i] = 0.018 + 0.02 * (1 - t); img[i + 1] = 0.02 + 0.022 * (1 - t); img[i + 2] = 0.03 + 0.03 * (1 - t); }
   }
 
-  const raster = (a: V3, bb: V3, c: V3, plot: (i: number, z: number) => void) => {
+  const raster = (a: V3, bb: V3, c: V3, plot: (i: number, z: number, w0: number, w1: number, w2: number) => void) => {
     if (a[2] <= 1e-6 || bb[2] <= 1e-6 || c[2] <= 1e-6) return;
     const area = (bb[0] - a[0]) * (c[1] - a[1]) - (bb[1] - a[1]) * (c[0] - a[0]);
     if (Math.abs(area) < 1e-9) return;
@@ -118,7 +133,8 @@ export function renderView(faces: Face[], pal: Palette, b: Bounds, o: ViewOpts =
         const w1 = ((c[0] - px) * (a[1] - py) - (c[1] - py) * (a[0] - px)) / area;
         const w2 = 1 - w0 - w1;
         if (w0 < 0 || w1 < 0 || w2 < 0) continue;
-        plot(y * W + x, 1 / (w0 * ia + w1 * ib + w2 * ic));
+        const iz = w0 * ia + w1 * ib + w2 * ic;
+        plot(y * W + x, 1 / iz, (w0 * ia) / iz, (w1 * ib) / iz, (w2 * ic) / iz);
       }
   };
 
@@ -136,13 +152,14 @@ export function renderView(faces: Face[], pal: Palette, b: Bounds, o: ViewOpts =
         for (const [i0, i1, i2] of [[0, 1, 2], [0, 2, 3]])
           raster(q[i0], q[i1], q[i2], (i, z) => {
             if (z >= zb[i]) return;
-            zb[i] = z; ground[i] = 1;
+            zb[i] = z * 1.0005; ground[i] = 1;          // a hair behind, so faces lying on y = 0 (a glass base) win
             img[i * 3] = shade * 0.92; img[i * 3 + 1] = shade * 0.95; img[i * 3 + 2] = shade * 1.08;
           });
       }
   }
 
-  const tris = triangulate(faces);
+  const sh = needsShading(faces, o.ao) ? shaded(faces, o.ao) : undefined;
+  const tris: Face[] = sh ?? triangulate(faces);
   // Cast shadow: every triangle projected onto the ground along the light, darkening ground pixels once.
   if (o.ground !== false) {
     const shadowed = new Uint8Array(W * H);
@@ -156,29 +173,45 @@ export function renderView(faces: Face[], pal: Palette, b: Bounds, o: ViewOpts =
     }
   }
 
-  const lin = new Map<string, { c: [number, number, number]; e?: [number, number, number]; metal: number; tex?: import("./palette.ts").TexRef }>();
-  for (const t of tris) {
+  const lin = new Map<string, { c: [number, number, number]; e?: [number, number, number]; metal: number; alpha: number; tex?: import("./palette.ts").TexRef }>();
+  const blended: { t: Face; d: number }[] = [];
+  const draw = (t: Face, alphaPass: boolean) => {
     let m = lin.get(t.mat);
     if (!m) {
       const mm = pal.get(t.mat);
-      m = { c: srgbToLinear(mm.color), e: mm.emit ? (srgbToLinear(mm.emit).map((x) => x * Math.min(1, (mm.glow ?? 3) / 3)) as [number, number, number]) : undefined, metal: mm.tex ? mm.metal * 0.5 : mm.metal, tex: mm.tex?.albedo ? mm.tex : undefined };
+      m = { c: srgbToLinear(mm.color), e: mm.emit ? (srgbToLinear(mm.emit).map((x) => x * Math.min(1, (mm.glow ?? 3) / 3)) as [number, number, number]) : undefined, metal: mm.tex ? mm.metal * 0.5 : mm.metal, alpha: mm.alpha ?? 1, tex: mm.tex?.albedo ? mm.tex : undefined };
       lin.set(t.mat, m);
     }
+    if (!alphaPass && m.alpha < 1) { blended.push({ t, d: Math.max(...t.v.map((q) => dot(sub(q, eye), fwd))) }); return; }
     const n = faceNormal(t.v);
     const p = t.v.map(proj);
     // Two-sided: flip normals that face away from the camera (open shapes, inner faces).
-    const c0 = t.v[0];
-    const nn = dot(n, sub(eye, c0)) < 0 ? scl(n, -1) : n;
-    const key = Math.max(0, dot(nn, LIGHT)), fill = Math.max(0, dot(nn, FILL));
-    const sky = 0.5 + 0.5 * nn[1];
-    const lightAmt = night ? 0.05 * sky + 0.02 + 0.1 * key : 0.25 * sky + 0.07 * (1 - sky) + 0.95 * key + 0.22 * fill;
-    const spec = m.metal > 0 && !night ? m.metal * 0.6 * Math.max(0, dot(nn, norm(add(LIGHT, norm(sub(eye, c0)))))) ** 24 : 0;
-    const pl: V3 = night ? punctual(lights, scl(add(add(t.v[0], t.v[1]), t.v[2]), 1 / 3), nn) : [0, 0, 0];
-    const col = m.c.map((v, k) => v * (lightAmt + pl[k]) * (1 - m!.metal * 0.4) + spec + (m!.e ? m!.e[k] * (night ? 1.4 : 1) : 0)) as V3;
-    const tx = m.tex, al = tx?.albedo;
-    raster(p[0], p[1], p[2], (i, z) => {
+    const c0 = t.v[0], flip = dot(n, sub(eye, c0)) < 0;
+    const lit = (nn: V3, at: V3): V3 => {
+      const key = Math.max(0, dot(nn, LIGHT)), fill = Math.max(0, dot(nn, FILL));
+      const sky = 0.5 + 0.5 * nn[1];
+      const lightAmt = night ? 0.05 * sky + 0.02 + 0.1 * key : 0.25 * sky + 0.07 * (1 - sky) + 0.95 * key + 0.22 * fill;
+      const spec = m!.metal > 0 && !night ? m!.metal * 0.6 * Math.max(0, dot(nn, norm(add(LIGHT, norm(sub(eye, at)))))) ** 24 : 0;
+      const pl: V3 = night ? punctual(lights, at, nn) : [0, 0, 0];
+      return m!.c.map((v, k) => v * (lightAmt + pl[k]) * (1 - m!.metal * 0.4) + spec + (m!.e ? m!.e[k] * (night ? 1.4 : 1) : 0)) as V3;
+    };
+    const st = t as ShadedTri;
+    let col: V3, cols: V3[] | undefined;
+    if (st.n) {
+      // per corner: the export's normal (flipped with the face), lit, times the baked occlusion
+      const ctr = scl(add(add(t.v[0], t.v[1]), t.v[2]), 1 / 3);
+      cols = st.n.map((cn, k) => scl(lit(flip ? scl(cn, -1) : cn, night ? ctr : t.v[k]), st.ao ? st.ao[k] : 1));
+      col = cols[0];
+    } else col = lit(flip ? scl(n, -1) : n, night ? scl(add(add(t.v[0], t.v[1]), t.v[2]), 1 / 3) : c0);
+    const tx = m.tex, al = tx?.albedo, opacity = alphaPass ? m.alpha : 1;
+    raster(p[0], p[1], p[2], (i, z, w0, w1, w2) => {
       if (z >= zb[i]) return;
-      zb[i] = z;
+      if (!alphaPass) zb[i] = z;
+      const c = cols ? [0, 1, 2].map((k) => cols![0][k] * w0 + cols![1][k] * w1 + cols![2][k] * w2) as V3 : col;
+      const put = (r: number, g: number, b2: number) => {
+        const a = opacity;
+        img[i * 3] = r * a + img[i * 3] * (1 - a); img[i * 3 + 1] = g * a + img[i * 3 + 1] * (1 - a); img[i * 3 + 2] = b2 * a + img[i * 3 + 2] * (1 - a);
+      };
       if (al && tx) {
         // back from the pixel and its depth to the surface point, then the box-projected texel
         const px = (i % W) + 0.5, py = Math.floor(i / W) + 0.5, a = ((px - W / 2) * z) / f, bb = (-(py - H / 2) * z) / f;
@@ -186,10 +219,13 @@ export function renderView(faces: Face[], pal: Palette, b: Bounds, o: ViewOpts =
         const [u, v] = boxUV(wp, n, tx.uv), N = al.n;
         const xi = ((Math.floor(u * N) % N) + N) % N, yi = ((Math.floor(v * N) % N) + N) % N, k = (yi * N + xi) * 3;
         const em = tx.emissive, g = night ? 2.2 : 1.2;
-        img[i * 3] = col[0] * al.data[k] + (em ? em.data[k] * g : 0); img[i * 3 + 1] = col[1] * al.data[k + 1] + (em ? em.data[k + 1] * g : 0); img[i * 3 + 2] = col[2] * al.data[k + 2] + (em ? em.data[k + 2] * g : 0);
-      } else { img[i * 3] = col[0]; img[i * 3 + 1] = col[1]; img[i * 3 + 2] = col[2]; }
+        put(c[0] * al.data[k] + (em ? em.data[k] * g : 0), c[1] * al.data[k + 1] + (em ? em.data[k + 1] * g : 0), c[2] * al.data[k + 2] + (em ? em.data[k + 2] * g : 0));
+      } else put(c[0], c[1], c[2]);
     });
-  }
+  };
+  for (const t of tris) draw(t, false);
+  blended.sort((x, y) => y.d - x.d);
+  for (const { t } of blended) draw(t, true);
 
   // Downsample 2x2 -> 1, linear -> sRGB.
   const w = W / S, h = H / S, out = new Uint8Array(w * h * 4);

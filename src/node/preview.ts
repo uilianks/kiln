@@ -9,7 +9,7 @@ import { gridStep, renderView, type ViewOpts } from "../core/render.ts";
 
 export function viewPng(b: Built, o: ViewOpts): Buffer {
   const w = o.w ?? 400, h = o.h ?? 400;
-  return Buffer.from(png(w, h, renderView(b.faces, b.pal, b.bounds, { lights: b.lights, ...o }), (x) => deflateSync(x)));
+  return Buffer.from(png(w, h, renderView(b.faces, b.pal, b.bounds, { lights: b.lights, ao: b.ao, ...o }), (x) => deflateSync(x)));
 }
 
 /** A clip as a strip of 8 evenly spaced frames from the hero angle, framed on the rest pose. */
@@ -19,7 +19,8 @@ export function clipStrip(b: Built, c: ClipDef, o: ViewOpts = {}): Buffer {
   for (let k = 0; k < n; k++) {
     const i = Math.round((k * c.frames) / n);
     const posed = poseFaces(b.faces, b.lights, b.joints, c.tracks, i);
-    const uri = "data:image/png;base64," + viewPng({ ...b, ...posed }, { yaw: 35, pitch: 20, ...o, w: cell, h: cell, fit: b.bounds }).toString("base64");
+    // posed frames: smooth normals follow the pose; AO is left out (it is a rest-pose bake)
+    const uri = "data:image/png;base64," + viewPng({ ...b, ...posed, ao: undefined }, { yaw: 35, pitch: 20, ...o, w: cell, h: cell, fit: b.bounds }).toString("base64");
     body += `<image x="${k * cell}" y="26" width="${cell}" height="${cell}" href="${uri}"/>` +
       `<text x="${k * cell + 6}" y="44" fill="#c9c3dd" font-size="11" font-family="monospace">f${i}</text>`;
   }

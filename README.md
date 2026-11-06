@@ -1,7 +1,8 @@
 # kiln
 
 **Low-poly and voxel 3D game assets as code.** Write a small `.kx.js` file of primitives, voxel
-layers, lights, mirrors and scatters. kiln builds flat-shaded meshes, exports **GLB** for Godot,
+layers, lights, mirrors and scatters. kiln builds flat-shaded meshes (or smooth ones with crisp creases and
+baked ambient occlusion, when you ask), exports **GLB** for Godot,
 Unity, Unreal and Three.js, renders previews an AI agent can read, and hands off to **Blender**
 for beauty renders, turntables and camera-move videos.
 
@@ -105,6 +106,90 @@ anyone looks.
 |---|---|
 | ![](docs/media/preview_hero.png) | ![](docs/media/preview_cabin.png) |
 
+## Examples
+
+Every file in [`examples/`](examples/) is built by `npm run check`. The images are kiln's own Blender renders
+of those files, unedited.
+
+### Flat, smooth, subdivided: [`smooth.kx.js`](examples/smooth.kx.js)
+
+![The same toy three times: flat-shaded, smooth-shaded with baked AO, and subdivided](docs/media/smooth_flat_smooth_subdiv.png)
+
+Left to right: the default flat look (1,584 triangles); the **same triangles** with `smooth: 50` and `ao: true`;
+and `subdiv(1, ...)` on the round parts (built from detail-1 spheres, 2,880 triangles).
+
+```js
+const toy = ({ detail = 2, round = (x) => x } = {}) => [
+  box(1.2, 0.16, 0.9, { mat: "wood", bevel: 0.05 }),
+  round(sphere(0.42, { mat: "shell", detail, pos: [0, 0.62, 0], scale: [1, 0.92, 0.9] })),
+  round(sphere(0.3, { mat: "shell", detail, pos: [0, 1.1, 0.02] })),
+  // ... belly, cap, eyes, feet, arms
+]
+model("toy_flat", toy())
+model("toy_smooth", { smooth: 50, ao: true }, toy())                     // shade across edges up to 50°, bake AO
+model("toy_subdiv", { smooth: 50, ao: true }, toy({ detail: 1, round: (item) => subdiv(1, item) }))
+```
+
+`smooth` is a crease angle: edges flatter than it shade smooth, sharper ones stay crisp. `subdiv` rounds the
+geometry itself, Loop for triangles and Catmull-Clark otherwise, and keeps sharp edges sharp: an unbevelled box
+stays a box, a bevelled one becomes a soft block (`--look studio` render):
+
+![A bevelled box and a plain box, before and after subdiv(2)](docs/media/smooth_blocks.png)
+
+```js
+model("block_flat", box(0.6, 0.6, 0.6, { mat: "cap", bevel: 0.08 }), box(0.6, 0.3, 0.6, { mat: "belly", pos: [0.8, 0, 0] }))
+model("block_subdiv", subdiv(2, box(0.6, 0.6, 0.6, { mat: "cap", bevel: 0.08 }), box(0.6, 0.3, 0.6, { mat: "belly", pos: [0.8, 0, 0] })))
+```
+
+### Glass and cards: also in [`smooth.kx.js`](examples/smooth.kx.js)
+
+Materials can be see-through (`alpha`) and double-sided (`double`):
+
+<img src="docs/media/smooth_jar.png" width="420" alt="A glass jar with a cork and a card inside">
+
+```js
+pal({ glass: { color: "#bfe3e0", alpha: 0.35, rough: 0.08, double: true }, sticker: { color: "#cb8175", double: true } })
+model("jar", { smooth: 50, ao: true },
+  lathe([0.2, 0, 0.26, 0.04, 0.27, 0.42, 0.18, 0.5, 0.17, 0.56], { mat: "glass", sides: 20 }),
+  extrude([-0.09, 0, 0.09, 0, 0.09, 0.22, -0.09, 0.22], 0.004, { mat: "sticker", pos: [0, 0.08, 0] }),
+  cyl(0.15, 0.1, { mat: "wood", sides: 14, bevel: 0.02, pos: [0, 0.52, 0] }))
+```
+
+### Basics: [`basics.kx.js`](examples/basics.kx.js)
+
+![A pack of a tree, two rocks, a crate, a house and a voxel mushroom](docs/media/example_basics.png)
+
+```js
+model("tree",
+  cyl(0.18, 1.2, { mat: "bark", sides: 6, top: 0.12 }),
+  cone(0.9, 1.4, { mat: "leaf", sides: 7, pos: [0, 0.9, 0], jitter: 0.06 }),
+  cone(0.7, 1.1, { mat: "leafL", sides: 7, pos: [0, 1.6, 0], jitter: 0.05 }),
+  cone(0.45, 0.8, { mat: "leaf", sides: 7, pos: [0, 2.2, 0] }))
+model("house",
+  box(2.4, 1.6, 2, "wall"),
+  prism(2.7, 1.1, 2.3, { mat: "roof", pos: [0, 1.6, 0] }),
+  box(0.5, 0.9, 0.06, { mat: "woodD", pos: [0, 0, 1.0] }),
+  sym("x", box(0.45, 0.45, 0.06, { mat: "glass", pos: [0.75, 0.8, 1.0] })),
+  cyl(0.16, 0.8, { mat: "stone", sides: 6, pos: [0.7, 2.0, -0.4] }))
+pack("kit", ["tree", "rock*", "crate", "house", "mushroom"])
+```
+
+### Animation: [`animated.kx.js`](examples/animated.kx.js)
+
+<img src="docs/media/example_animated.png" width="520" alt="A windmill with turning sails, a swinging door and a lantern">
+
+```js
+part("sails", { pivot: [0, 2.3, 0.6] }, /* hub and four sails */),
+part("lantern", { pivot: [1.1, 1.3, 0.9] }, box(0.16, 0.2, 0.16, { mat: "iron", pos: [1.1, 1.0, 0.9] }),
+  light({ color: "#ffa040", power: 30, pos: [1.1, 1.1, 1.05] })))
+animate("windmill", "turn", { frames: 48, fps: 24 }, {
+  sails: { rot: [[0, [0, 0, 0], "linear"], [48, [0, 0, -360]]] },
+  door: { rot: [[0, [0, 0, 0]], [12, [0, -80, 0]], [36, [0, -80, 0]], [48, [0, 0, 0]]] },
+})
+```
+
+`kiln render examples/animated.kx.js windmill --clip turn --clip-frame 10` poses the clip at frame 10.
+
 ## Quick start
 
 ```bash
@@ -162,18 +247,25 @@ kiln render scene.kx.js last_cup --mood night --focus 0.1,2.65,2.1 --zoom 1.3 \
   easings), exported as glTF animations, previewed as frame strips, played in Blender renders.
 - **Lights:** point and spot `light()` items that move with the model through stamps, mirrors and
   scatter. They export as `KHR_lights_punctual`.
-- **Game-ready GLB:** flat normals, PBR materials, emissive strength, one primitive per material,
-  named nodes, lights; packs for asset libraries. Models are re-centered with their base on y = 0.
+- **Smooth stylised look (opt-in):** `smooth` crease-angle shading (welded, indexed GLB primitives),
+  `subdiv` (Loop / Catmull-Clark keeping sharp edges), and ambient occlusion baked into vertex colours
+  (`ao`, `COLOR_0`). The default stays flat, and files that do not use them build byte-identical GLBs.
+- **Game-ready GLB:** flat or smooth normals, PBR materials (blended `alpha`, `double`-sided), emissive
+  strength, one primitive per material, named nodes, lights; packs for asset libraries. Models are
+  re-centered with their base on y = 0.
 - **Agent eyes:** a built-in rasterizer with shadows, a ground grid and night lighting: 4-view
   previews, `kiln info`, turntable GIFs.
 - **Live viewer:** drag to orbit, replay the build step by step, download the GLB, rebuild on save.
 - **Blender renders:** headless EEVEE with AgX and bloom. Day or night mood (moonlight, volumetric
-  haze), focus, zoom and lens; turntables and eased camera moves to MP4 with an optional soundtrack.
+  haze), a `--look studio` look-dev mode (studio HDRI, contact AO), a `--preset game` fixed-angle game
+  camera, focus, zoom and lens; turntables and eased camera moves to MP4 with an optional soundtrack.
 
 ### Tested
 
 Every primitive's signed volume equals the exact solid, so all faces point outward. Mirrors,
 jitter and voxels stay closed. The GLB structure, materials and lights are checked byte by byte.
+Subdivision keeps an unbevelled box exactly a box and a subdivided sphere inside its cage; smooth normals
+of a sphere point radially; baked AO is darker in a corner than in the open; and every example builds.
 Every showcase GLB imports and renders in Blender 5.2, and renders fail loudly if the output file
 never appears (for example, a sandboxed Blender writing outside your home directory).
 

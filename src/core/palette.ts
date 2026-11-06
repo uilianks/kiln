@@ -34,10 +34,24 @@ export interface Mat {
   emit?: string;
   /** Emission strength (default 3 when `emit` is set). */
   glow?: number;
+  /** Crease angle in degrees for faces of this material (0 = flat). */
+  smooth?: number;
+  /** Opacity 0..1 (below 1: glTF alphaMode BLEND). */
+  alpha?: number;
+  /** Double-sided (no back-face culling). */
+  double?: boolean;
+}
+
+/** A `smooth` option: true = 50°, false = 0 (flat), or a crease angle 0..180. */
+export function smoothAngle(v: unknown, what: string): number {
+  if (v === true) return 50;
+  if (v === false) return 0;
+  if (typeof v !== "number" || !(v >= 0 && v <= 180)) throw new KilnError(`${what}: smooth is a crease angle in degrees 0..180, or true (50) / false (flat)`);
+  return v;
 }
 
 const HEX = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
-const MAT_KEYS = ["color", "rough", "metal", "emit", "glow", "tex", "uv", "bump"];
+const MAT_KEYS = ["color", "rough", "metal", "emit", "glow", "tex", "uv", "bump", "smooth", "alpha", "double"];
 const SWEETIE = ["1a1c2c", "5d275d", "b13e53", "ef7d57", "ffcd75", "a7f070", "38b764", "257179",
   "29366f", "3b5dc9", "41a6f6", "73eff7", "f4f4f4", "94b0c2", "566c86", "333c57"];
 
@@ -67,7 +81,7 @@ export class Palette {
     return new Palette(new Map(SWEETIE.map((c, i) => [i.toString(16), { color: "#" + c, rough: 0.8, metal: 0 }])));
   }
 
-  /** key: "#hex" | another key | { color, rough, metal, emit, glow, tex, uv, bump } */
+  /** key: "#hex" | another key | { color, rough, metal, emit, glow, tex, uv, bump, smooth, alpha, double } */
   extend(defs: Record<string, unknown>): Palette {
     const m = new Map(this.mats);
     for (const [k, v] of Object.entries(defs)) {
@@ -88,6 +102,13 @@ export class Palette {
           mat.tex = { src: o.tex as string, uv, bump };
         }
         if (o.emit !== undefined) { mat.emit = normHex(String(o.emit)); mat.glow = Number(o.glow ?? 3); }
+        if (o.smooth !== undefined) mat.smooth = smoothAngle(o.smooth, `material '${k}'`);
+        if (o.alpha !== undefined) {
+          const a = Number(o.alpha);
+          if (!(a >= 0 && a <= 1)) throw new KilnError(`material '${k}': alpha is opacity 0..1`);
+          mat.alpha = a;
+        }
+        if (o.double !== undefined) mat.double = !!o.double;
         m.set(k, mat);
       } else throw new KilnError(`material '${k}': use "#hex" or { color, rough, metal, emit, glow }`);
     }

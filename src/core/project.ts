@@ -2,7 +2,9 @@
 // builder that turns definitions into face lists.
 import { KilnError, didYouMean, wrap } from "./errors.ts";
 import { type Bounds, type Face, type Joint, type Light, type Part, bounds, renameParts, jitter, recolor, transform, transformLights, transformPart, triCount } from "./mesh.ts";
-import { Palette, normHex } from "./palette.ts";
+import { Palette, normHex, smoothAngle } from "./palette.ts";
+import { type AoOpts, aoOpts } from "./ao.ts";
+import { subdivide } from "./subdiv.ts";
 import { type ClipDef, checkTracks } from "./anim.ts";
 import { box, cyl, extrude, lathe, prism, rock, sphere, terrain, torus, tube, wedge } from "./prims.ts";
 import { type Grid, gridFn, meshGrid, parseLayers } from "./voxel.ts";
@@ -15,7 +17,7 @@ export interface Step {
 
 /** Geometry made at definition time, or a reference resolved at build time. */
 interface Geo { __geo: true; faces: Face[]; lights?: Light[]; step: Step }
-interface Ref { __ref: "stamp" | "scatter" | "tf" | "sym" | "part"; args: unknown[]; step: Step }
+interface Ref { __ref: "stamp" | "scatter" | "tf" | "sym" | "part" | "subdiv"; args: unknown[]; step: Step }
 type Item = Geo | Ref | Item[] | null | undefined | false;
 
 export interface ModelOpts {
@@ -23,6 +25,10 @@ export interface ModelOpts {
   base?: string;
   swap?: Record<string, string>;
   scale?: number;
+  /** Default crease angle for the model's faces (degrees). */
+  smooth?: number | boolean;
+  /** Bake ambient occlusion into COLOR_0. */
+  ao?: boolean | AoOpts;
 }
 
 export interface ModelDef {
@@ -51,9 +57,11 @@ export interface Built {
   lights: Light[];
   /** Animatable parts (named nodes with pivots). */
   joints: Joint[];
+  /** Bake ambient occlusion at export (model option `ao`). */
+  ao?: AoOpts;
 }
 
-const MODEL_OPTS = ["pivot", "base", "swap", "scale"];
+const MODEL_OPTS = ["pivot", "base", "swap", "scale", "smooth", "ao"];
 const PLACE = ["pos", "rot", "scale"];
 const SHAPE_OPTS: Record<string, string[]> = {
   box: ["bevel"], cyl: ["sides", "top", "bevel"], cone: ["sides"], sphere: ["detail"], rock: ["detail", "rough", "squash", "seed"],
@@ -158,7 +166,7 @@ export class Project {
     const style = (kind: string, v: unknown): { mat: string; o: Record<string, unknown> } => {
       if (typeof v === "string") return { mat: mat(v), o: {} };
       if (!isPlain(v)) throw new KilnError(`needs a material: "${[...this.pal.mats.keys()][0]}" or { mat, pos, rot, scale, ... }`);
-      checkKeys("options", v, ["mat", ...PLACE, "jitter", "seed", ...SHAPE_OPTS[kind].filter((k) => k !== "seed")]);
+      checkKeys("options", v, ["mat", ...PLACE, "jitter", "seed", "smooth", ...SHAPE_OPTS[kind].filter((k) => k !== "seed")]);
       if (v.mat === undefined && !NO_MAT.includes(kind)) throw new KilnError(`${kind} needs { mat: "key" }${kind === "terrain" ? " or { mat: (h, slope, x, z) => key }" : ""}`);
       if (typeof v.mat === "function") {
         if (kind !== "terrain") throw new KilnError(`${kind}: mat must be a palette key`);
@@ -182,6 +190,7 @@ export class Project {
       const { mat: m, o } = style(kind, args[args.length - 1]);
       let faces = transform(make(m, o), placeM(o));
       if (o.jitter !== undefined) faces = jitter(faces, num(o.jitter, "jitter"), Number(o.seed ?? hash(`${kind}|${loc}`)));
+      if (o.smooth !== undefined) { const s = smoothAngle(o.smooth, kind); faces = faces.map((f) => ({ ...f, smooth: s })); }
       return { __geo: true, faces, step: { label: `${kind}(${args.slice(0, -1).map(fmt).join(", ")})`, loc } };
     });
 
@@ -196,6 +205,8 @@ export class Project {
       const opts = (isPlain(rest[0]) ? rest.shift() : {}) as ModelOpts;
       checkKeys(`model '${name}'`, opts, MODEL_OPTS);
       if (opts.pivot !== undefined && !["bottom", "center", "origin"].includes(opts.pivot)) throw new KilnError('pivot must be "bottom", "center" or "origin"');
+      if (opts.smooth !== undefined) smoothAngle(opts.smooth, `model '${name}'`);
+      aoOpts(opts.ao, `model '${name}' ao`);
       for (const [k, v] of Object.entries(opts.swap ?? {})) { mat(k); mat(v); }
       this.models.set(name, { name, opts, items: rest as Item[], pal: this.pal, loc });
       this.order.push(name);
@@ -333,6 +344,15 @@ export class Project {
       placeM(o);
       return ref("tf", [o, ...items], `tf(${Object.keys(o).join(", ")})`);
     });
+    env.subdiv = (lv: unknown, ...items: unknown[]) => at("subdiv", () => {
+      const o = (typeof lv === "number" ? { levels: lv } : lv) as Record<string, unknown>;
+      if (!isPlain(o)) throw new KilnError("subdiv(levels, ...items) or subdiv({ levels, crease }, ...items)");
+      checkKeys("subdiv", o, ["levels", "crease"]);
+      if (!(Number.isInteger(o.levels) && (o.levels as number) >= 1 && (o.levels as number) <= 4)) throw new KilnError("subdiv levels must be a whole number 1..4");
+      const crease = o.crease === undefined ? 60 : Number(o.crease);
+      if (!(crease >= 0 && crease <= 180)) throw new KilnError("subdiv crease is an angle in degrees 0..180");
+      return ref("subdiv", [{ levels: o.levels, crease }, ...items], `subdiv(${o.levels})`);
+    });
     env.sym = (axis: unknown, ...items: unknown[]) => at("sym", () => {
       if (axis !== "x" && axis !== "z") throw new KilnError('sym("x" | "z", ...items): items plus their mirror image across x = 0 (or z = 0)');
       return ref("sym", [axis, ...items], `sym("${axis}")`);
@@ -419,9 +439,11 @@ export class Project {
 
   private buildDef(def: ModelDef): Built {
     let faces: Face[] = [], lights: Light[] = [], joints: Joint[] = [];
+    let baseAo: AoOpts | undefined;
     const steps: Built["steps"] = [];
     if (def.opts.base) {
       const b = this.build(def.opts.base);
+      baseAo = b.ao;
       faces.push(...b.faces);
       lights.push(...b.lights);
       joints.push(...b.joints);
@@ -436,6 +458,14 @@ export class Project {
       steps.push({ label: st.label, loc: st.loc, end: faces.length });
     }
     if (def.opts.swap) faces = recolor(faces, def.opts.swap);
+    // smooth: a face's own (from its shape) wins, then its material's, then the model's
+    const ms = def.opts.smooth === undefined ? undefined : smoothAngle(def.opts.smooth, "smooth");
+    if (ms !== undefined || [...def.pal.mats.values()].some((m) => m.smooth !== undefined))
+      faces = faces.map((f) => {
+        if (f.smooth !== undefined) return f;
+        const s = def.pal.mats.get(f.mat)?.smooth ?? ms;
+        return s === undefined ? f : { ...f, smooth: s };
+      });
     if (def.opts.scale !== undefined) {
       const m = scaleM(vec(def.opts.scale, "scale", [1, 1, 1]));
       ({ faces, lights } = transformPart({ faces, lights }, m));
@@ -453,7 +483,8 @@ export class Project {
       names.add(j.name);
     }
     for (const j of joints) if (j.parent && !names.has(j.parent)) throw new KilnError(`part '${j.name}': unknown parent '${j.parent}'${didYouMean(j.parent, names)}`);
-    return { name: def.name, faces, steps, bounds: bounds(faces), tris: triCount(faces), pal: def.pal, lights, joints };
+    const ao = def.opts.ao === undefined ? baseAo : aoOpts(def.opts.ao);   // a variant keeps its base's ao unless it sets its own
+    return { name: def.name, faces, steps, bounds: bounds(faces), tris: triCount(faces), pal: def.pal, lights, joints, ...(ao ? { ao } : {}) };
   }
 
   private expand(item: unknown, depth: number): Part {
@@ -475,6 +506,10 @@ export class Project {
   private resolve(r: Ref, depth: number): Part {
     const a = r.args;
     if (r.__ref === "tf") return transformPart(this.expand(a.slice(1), depth + 1), placeM(a[0] as Record<string, unknown>));
+    if (r.__ref === "subdiv") {
+      const p = this.expand(a.slice(1), depth + 1), o = a[0] as { levels: number; crease: number };
+      return { ...p, faces: subdivide(p.faces, o.levels, o.crease) };
+    }
     if (r.__ref === "sym") {
       const p = this.expand(a.slice(1), depth + 1);
       // The mirror copy's parts get a "~m" suffix so both sides can animate independently.

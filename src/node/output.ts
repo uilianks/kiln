@@ -56,7 +56,7 @@ export function packLayout(p: Project, pk: PackDef): { models: GlbModel[]; combi
     for (const b of row) {
       const [w] = size(b);
       const t: V3 = [x + w / 2 - (b.bounds.min[0] + b.bounds.max[0]) / 2, 0, z + depth[ri] / 2 - (b.bounds.min[2] + b.bounds.max[2]) / 2];
-      models.push({ name: b.name, faces: b.faces, pal: b.pal, lights: b.lights, translation: t });
+      models.push({ name: b.name, faces: b.faces, pal: b.pal, lights: b.lights, translation: t, ao: b.ao });
       all.push(...transform(b.faces, translate(t)));
       allLights.push(...transformLights(b.lights, translate(t)));
       x += w + gap;
@@ -91,7 +91,7 @@ export function writeOutputs(p: Project, out: string, opts: OutputOptions = {}):
     try {
       const b = p.build(name);
       const clips = p.clips.filter((c) => c.model === name);
-      write(join(out, "models", name + ".glb"), glb([{ name, faces: b.faces, pal: b.pal, lights: b.lights, joints: b.joints, clips, rig: opts.rig }]));
+      write(join(out, "models", name + ".glb"), glb([{ name, faces: b.faces, pal: b.pal, lights: b.lights, joints: b.joints, clips, rig: opts.rig, ao: b.ao }]));
       if (opts.stl) write(join(out, "models", name + ".stl"), stl(b.faces, name));
       if (opts.preview !== false) {
         write(join(out, "_preview", name + ".png"), previewPng(b));

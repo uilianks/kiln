@@ -5,7 +5,8 @@ description: Create low-poly and voxel 3D game assets (characters, props, trees,
 
 # kiln: 3D game assets as code
 
-You write a small `.kx.js` file; kiln builds flat-shaded low-poly meshes and greedy-meshed voxels,
+You write a small `.kx.js` file; kiln builds low-poly meshes (flat-shaded, or smooth with crisp creases and
+baked AO when you ask) and greedy-meshed voxels,
 exports a GLB per model and packs (one GLB, one named node per model), and renders previews you
 can read. Needs Node ≥ 22.18 and `npm install` once in this skill's directory. Blender (optional)
 does beauty renders and turntable videos.
@@ -92,14 +93,29 @@ pack("kit", ["pine", "crate", "rock", "gem"])
   and give lit surfaces mid-tone, non-metal colors or the light won't show.
 - **Textures**: `pal({ brick: { tex: "../loom/out/brick_wall", uv: 1.5 } })` uses a loom material
   (seamless PBR maps) with box-projected UVs, `uv` meters per tile; the GLB embeds every map.
-- **Materials**: `pal({ key: "#hex" | { color, rough, metal, emit, glow } })`. GLB gets PBR materials;
-  emissive uses `KHR_materials_emissive_strength`.
+- **Materials**: `pal({ key: "#hex" | { color, rough, metal, emit, glow, smooth, alpha, double } })`. GLB gets PBR
+  materials; emissive uses `KHR_materials_emissive_strength`; `alpha` < 1 exports as blended, `double: true` as
+  double-sided.
+- **Smooth stylised look** (opt-in; the default stays flat): `smooth: 50` (or `true`) on a shape, material or model
+  shades across edges up to 50° and keeps sharper ones crisp, at no extra triangles. To round a ring of
+  `sides` segments the angle must be above 360 / sides. `subdiv(1, ...items)` rounds
+  geometry (Loop for triangles, Catmull-Clark otherwise; edges above `crease`, default 60°, stay sharp, and a
+  `bevel` acts as a support edge): about 4× triangles per level, so spend it on silhouettes. `ao: true` on a
+  model bakes ambient occlusion into vertex colours (`COLOR_0`). Godot shows it with its imported material;
+  a material you assign must use vertex colour as albedo. `sphere` `detail` goes up to 6.
+- **Look-dev**: `KILN render ... --look studio` (studio HDRI, contact AO) to judge shapes; `--preset game`
+  frames the asset from a fixed game camera (yaw 45°, pitch 35°, 25° fov, 25.8 m) to see it at play size.
 
 Full API: [reference.md](reference.md).
 
 ## Habits that make better low-poly assets
 
 - `bevel` on `box`/`cyl` (5–15% of the smallest side) gives chunky, toy-like edges that catch light; use it on most hard-surface parts.
+- Smooth stylised: build for it rather than flipping it on a flat model. `smooth: true` (50) on organic shapes
+  first (free; 30–40 on hard-surface parts keeps chamfers crisp), `ao: { dist: 0.2 }` for contact shadows (free in
+  triangles; `strength: 0.3` for a strict palette), `subdiv` last and only on parts whose outline shows. Mixed
+  shape languages show: smooth limbs next to boxy hands, detail-0 noses with polygon outlines. Compare before/after with `kiln info` triangle counts and the
+  same preview angle; a project with a fixed look (a game's style guide) only opts in when its owner says so.
 - Shape language first: a few big primitives that read at a glance, then 2–3 detail parts.
 - Low counts: 6–8 sides for trunks and rocks, `detail: 1` spheres; props 50–800 tris, characters
   under 1k. `jitter` (0.02–0.08) makes primitives feel hand-made.

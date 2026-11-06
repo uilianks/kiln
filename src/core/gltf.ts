@@ -1,4 +1,7 @@
-// glTF 2.0 binary (GLB) writer: one node per model, one primitive per material, flat normals.
+// glTF 2.0 binary (GLB) writer: one node per model, one primitive per material. Flat primitives keep
+// one normal per triangle and no index buffer; smooth or AO-baked ones are welded and indexed.
+import type { AoOpts } from "./ao.ts";
+import { type ShadedTri, isSmooth, needsShading, shade } from "./shade.ts";
 import { type ClipDef, partValues } from "./anim.ts";
 import { type Face, type Joint, type Light, faceNormal, triangulate } from "./mesh.ts";
 import { type Palette, boxUV, srgbToLinear } from "./palette.ts";
@@ -15,6 +18,8 @@ export interface GlbModel {
   clips?: ClipDef[];
   /** Export the parts as a skinned skeleton (bones + weights) instead of one mesh node per part. */
   rig?: boolean;
+  /** Bake ambient occlusion into COLOR_0. */
+  ao?: AoOpts;
 }
 
 /** Quaternion [x, y, z, w] for kiln's rotation order (X, then Y, then Z), degrees. */
@@ -98,6 +103,11 @@ export function glb(models: GlbModel[]): Uint8Array {
       mat.emissiveFactor = srgbToLinear(m.emit);
       if ((m.glow ?? 1) > 1) { mat.extensions = { KHR_materials_emissive_strength: { emissiveStrength: m.glow } }; emissiveStrength = true; }
     }
+    if (m.alpha !== undefined && m.alpha < 1) {
+      (mat.pbrMetallicRoughness as { baseColorFactor: number[] }).baseColorFactor[3] = m.alpha;
+      mat.alphaMode = "BLEND";
+    }
+    if (m.double) mat.doubleSided = true;
     materials.push(mat);
     i = materials.length - 1;
     matIndex.set(key, i);
@@ -119,6 +129,8 @@ export function glb(models: GlbModel[]): Uint8Array {
     const primitives: Record<string, unknown>[] = [];
     for (const [key, tris] of byMat) {
       const tex = pal.get(key).tex;
+      // welded + indexed only when this primitive has smooth faces or baked AO; flat ones stay as they always were
+      if (tris.some((t) => isSmooth(t) || (t as ShadedTri).ao)) { primitives.push(indexed(key, tris as ShadedTri[], pal, origin, boneOf)); continue; }
       const pos = new Float32Array(tris.length * 9), nrm = new Float32Array(tris.length * 9), uv = tex ? new Float32Array(tris.length * 6) : undefined;
       const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
       const jb = boneOf ? new Uint8Array(tris.length * 12) : undefined;
@@ -152,6 +164,50 @@ export function glb(models: GlbModel[]): Uint8Array {
     return meshes.length - 1;
   };
 
+  /** A welded, indexed primitive: one vertex per unique (position, normal, AO, UV, bone). */
+  const indexed = (key: string, tris: ShadedTri[], pal: Palette, origin: V3, boneOf?: (f: Face) => number): Record<string, unknown> => {
+    const tex = pal.get(key).tex, ao = tris.some((t) => t.ao);
+    const at = new Map<string, number>(), pos: number[] = [], nrm: number[] = [], uv: number[] = [], col: number[] = [], bones: number[] = [], index: number[] = [];
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (const t of tris) {
+      const fnrm = faceNormal(t.v), bone = boneOf ? boneOf(t) : 0;
+      t.v.forEach((p, k) => {
+        const n = t.n[k], c = t.ao ? t.ao[k] : 1, u = tex ? boxUV(p, fnrm, tex.uv) : undefined;
+        const q = (x: number) => Math.round(x * 1e5);
+        const id = `${q(p[0])},${q(p[1])},${q(p[2])}|${q(n[0])},${q(n[1])},${q(n[2])}|${q(c)}|${u ? `${q(u[0])},${q(u[1])}` : ""}|${bone}`;
+        let i = at.get(id);
+        if (i === undefined) {
+          i = pos.length / 3;
+          at.set(id, i);
+          for (let c3 = 0; c3 < 3; c3++) {
+            const x = p[c3] - origin[c3];
+            pos.push(x); nrm.push(n[c3]);
+            if (x < min[c3]) min[c3] = x;
+            if (x > max[c3]) max[c3] = x;
+          }
+          if (u) uv.push(u[0], u[1]);
+          if (ao) col.push(c, c, c);
+          if (boneOf) bones.push(bone);
+        }
+        index.push(i);
+      });
+    }
+    const n = pos.length / 3;
+    const attributes: Record<string, number> = { POSITION: push(new Float32Array(pos), "VEC3", min, max), NORMAL: push(new Float32Array(nrm), "VEC3") };
+    if (tex) attributes.TEXCOORD_0 = push(new Float32Array(uv), "VEC2");
+    if (ao) attributes.COLOR_0 = push(new Float32Array(col), "VEC3");
+    if (boneOf) {
+      const jb = new Uint8Array(n * 4);
+      bones.forEach((b, i) => (jb[i * 4] = b));
+      accessors.push({ bufferView: blob(jb, 34962), componentType: 5121, count: n, type: "VEC4" });
+      attributes.JOINTS_0 = accessors.length - 1;
+      attributes.WEIGHTS_0 = push(new Float32Array(n * 4).map((_, i) => (i % 4 === 0 ? 1 : 0)), "VEC4");
+    }
+    const big = n > 65535, ib = big ? new Uint32Array(index) : new Uint16Array(index);
+    accessors.push({ bufferView: blob(new Uint8Array(ib.buffer, ib.byteOffset, ib.byteLength), 34963), componentType: big ? 5125 : 5123, count: index.length, type: "SCALAR" });
+    return { attributes, indices: accessors.length - 1, material: material(key, pal), mode: 4 };
+  };
+
   const lightNode = (mdl: GlbModel, i: number, l: Light, origin: V3): number => {
     // Watts -> candela, the inverse of Blender's importer, so power survives the round trip.
     const light: Record<string, unknown> = { name: `${mdl.name}_light_${i}`, type: l.type, color: srgbToLinear(l.color), intensity: (l.power * 683) / (4 * Math.PI) };
@@ -165,7 +221,8 @@ export function glb(models: GlbModel[]): Uint8Array {
     return nodes.length - 1;
   };
 
-  for (const mdl of models) {
+  for (const mdl0 of models) {
+    const mdl = needsShading(mdl0.faces, mdl0.ao) ? { ...mdl0, faces: shade(mdl0.faces, mdl0.ao) } : mdl0;
     const joints = mdl.joints ?? [], names = new Set(joints.map((j) => j.name));
     const partOf = (k?: string) => (k && names.has(k) ? k : "");
     const facesBy = new Map<string, Face[]>(), lightsBy = new Map<string, [number, Light][]>();
