@@ -286,3 +286,7 @@ PATH, or the `org.blender.Blender` flatpak) and ffmpeg (optional, for GIF/MP4).
 
 [MIT](LICENSE). Portions adapted from [claude-pxl](https://github.com/crsolver/claude-pxl)
 (MIT, © crsolver), via vex.
+
+## Support
+
+If this tool helps you, you can support its development on [Ko-fi](https://ko-fi.com/uiliankidricki).
