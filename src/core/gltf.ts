@@ -13,6 +13,8 @@ export interface GlbModel {
   /** Animatable parts: each becomes a node rotating about its pivot. */
   joints?: Joint[];
   clips?: ClipDef[];
+  /** Export the parts as a skinned skeleton (bones + weights) instead of one mesh node per part. */
+  rig?: boolean;
 }
 
 /** Quaternion [x, y, z, w] for kiln's rotation order (X, then Y, then Z), degrees. */
@@ -38,7 +40,7 @@ export function glb(models: GlbModel[]): Uint8Array {
   const chunks: Uint8Array[] = [];
   let byteLength = 0;
   const bufferViews: Record<string, unknown>[] = [], accessors: Record<string, unknown>[] = [];
-  const SIZE = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 };
+  const SIZE = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
   /** Raw bytes into the binary chunk (4-byte aligned); returns the bufferView. */
   const blob = (bytes: Uint8Array, target?: number): number => {
     bufferViews.push({ buffer: 0, byteOffset: byteLength, byteLength: bytes.length, ...(target ? { target } : {}) });
@@ -48,7 +50,7 @@ export function glb(models: GlbModel[]): Uint8Array {
     if (pad) { chunks.push(new Uint8Array(pad)); byteLength += pad; }
     return bufferViews.length - 1;
   };
-  const push = (data: Float32Array, kind: "VEC2" | "VEC3" | "VEC4" | "SCALAR", min?: number[], max?: number[], vertex = true): number => {
+  const push = (data: Float32Array, kind: "VEC2" | "VEC3" | "VEC4" | "MAT4" | "SCALAR", min?: number[], max?: number[], vertex = true): number => {
     const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     bufferViews.push({ buffer: 0, byteOffset: byteLength, byteLength: bytes.length, ...(vertex ? { target: 34962 } : {}) });
     chunks.push(bytes);
@@ -103,10 +105,10 @@ export function glb(models: GlbModel[]): Uint8Array {
   };
 
   const meshes: Record<string, unknown>[] = [], nodes: Record<string, unknown>[] = [], roots: number[] = [];
-  const lights: Record<string, unknown>[] = [], animations: Record<string, unknown>[] = [];
+  const lights: Record<string, unknown>[] = [], animations: Record<string, unknown>[] = [], skins: Record<string, unknown>[] = [];
 
   /** One mesh from faces, positions relative to `origin`; undefined when there are no faces. */
-  const mesh = (name: string, faces: Face[], pal: Palette, origin: V3): number | undefined => {
+  const mesh = (name: string, faces: Face[], pal: Palette, origin: V3, boneOf?: (f: Face) => number): number | undefined => {
     const byMat = new Map<string, Face[]>();
     for (const f of triangulate(faces)) {
       const l = byMat.get(f.mat) ?? [];
@@ -119,7 +121,9 @@ export function glb(models: GlbModel[]): Uint8Array {
       const tex = pal.get(key).tex;
       const pos = new Float32Array(tris.length * 9), nrm = new Float32Array(tris.length * 9), uv = tex ? new Float32Array(tris.length * 6) : undefined;
       const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+      const jb = boneOf ? new Uint8Array(tris.length * 12) : undefined;
       tris.forEach((t, i) => {
+        if (jb && boneOf) jb.fill(0, i * 12, i * 12 + 12), [0, 1, 2].forEach((k) => (jb[i * 12 + k * 4] = boneOf(t)));
         const n = faceNormal(t.v);
         t.v.forEach((p, k) => {
           // UVs from the model-space position (before re-centering), so tiles line up across meshes
@@ -135,6 +139,13 @@ export function glb(models: GlbModel[]): Uint8Array {
       });
       const attributes: Record<string, number> = { POSITION: push(pos, "VEC3", min, max), NORMAL: push(nrm, "VEC3") };
       if (uv) attributes.TEXCOORD_0 = push(uv, "VEC2");
+      if (jb) {
+        // rigid skinning: every vertex follows exactly one bone
+        const bv = blob(jb, 34962);
+        accessors.push({ bufferView: bv, componentType: 5121, count: tris.length * 3, type: "VEC4" });
+        attributes.JOINTS_0 = accessors.length - 1;
+        attributes.WEIGHTS_0 = push(new Float32Array(tris.length * 12).map((_, i) => (i % 4 === 0 ? 1 : 0)), "VEC4");
+      }
       primitives.push({ attributes, material: material(key, pal), mode: 4 });
     }
     meshes.push({ name, primitives });
@@ -183,7 +194,29 @@ export function glb(models: GlbModel[]): Uint8Array {
       if (children.length) node.children = children;
       return idx;
     };
-    roots.push(build(""));
+    if (mdl.rig && joints.length) {
+      // Skinned export: one mesh weighted 100% to the bone of its part, bones named after the parts, plus a "root" bone for the static body.
+      const order = ["", ...joints.map((j) => j.name)], boneIdx = new Map(order.map((k, i) => [k, i]));
+      const m = mesh(mdl.name, mdl.faces, mdl.pal, [0, 0, 0], (f) => boneIdx.get(partOf(f.part)) ?? 0);
+      const bone = (k: string): number => {
+        const pv = pivotOf(k), j = joints.find((x) => x.name === k);
+        const pp = k ? pivotOf(partOf(j!.parent)) : ([0, 0, 0] as V3);
+        const children = (lightsBy.get(k) ?? []).map(([i, l]) => lightNode(mdl, i, l, pv));
+        const node: Record<string, unknown> = { name: k || "root", translation: [pv[0] - pp[0], pv[1] - pp[1], pv[2] - pp[2]] };
+        nodes.push(node);
+        const idx = nodes.length - 1;
+        nodeOf.set(k, idx);
+        for (const c of joints.filter((x) => partOf(x.parent) === k && x.name !== k)) children.push(bone(c.name));
+        if (children.length) node.children = children;
+        return idx;
+      };
+      const rootBone = bone("");
+      const ibm = new Float32Array(order.length * 16);
+      order.forEach((k, i) => { const pv = pivotOf(k); ibm.set([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -pv[0], -pv[1], -pv[2], 1], i * 16); });
+      skins.push({ name: `${mdl.name}_skeleton`, joints: order.map((k) => nodeOf.get(k)!), inverseBindMatrices: push(ibm, "MAT4", undefined, undefined, false), skeleton: rootBone });
+      nodes.push({ name: mdl.name, ...(m !== undefined ? { mesh: m, skin: skins.length - 1 } : {}), ...(mdl.translation ? { translation: mdl.translation } : {}), children: [rootBone] });
+      roots.push(nodes.length - 1);
+    } else roots.push(build(""));
 
     // Animations: one sample per frame (0..frames inclusive), linear between them.
     for (const clip of mdl.clips ?? []) {
@@ -213,6 +246,7 @@ export function glb(models: GlbModel[]): Uint8Array {
     nodes, meshes, materials, accessors, bufferViews, buffers: [{ byteLength }],
   };
   if (animations.length) json.animations = animations;
+  if (skins.length) json.skins = skins;
   if (textures.length) Object.assign(json, { images, textures, samplers: [{ magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }] });
   const used = [...(emissiveStrength ? ["KHR_materials_emissive_strength"] : []), ...(lights.length ? ["KHR_lights_punctual"] : [])];
   if (used.length) json.extensionsUsed = used;

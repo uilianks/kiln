@@ -30,7 +30,8 @@ does beauty renders and turntable videos.
    `mat`, `part`, and the build `step` with its source `loc`, so you know which line made that face),
    or `null` if it missed the model; strokes list what they `cover` (by step and material, with world
    bounds). Look at `<model>.annotated.png` for the view. Comments persist between sends: check `time`.
-6. Ship: GLBs are in `out/models/` and `out/<pack>.glb` (`--stl` adds printable STLs). Portfolio shots:
+6. Rigs: `KILN build models.kx.js --rig` exports every model that has `part()`s as a skinned skeleton (bones named after the parts + `root`, clips on the bones) instead of one node per part: use it for assets that ship animatable (Godot `Skeleton3D`).
+7. Ship: GLBs are in `out/models/` and `out/<pack>.glb` (`--stl` adds printable STLs). Portfolio shots:
    `KILN render models.kx.js <name> --size 1920x1080` (Blender), add `--frames 180` for a turntable MP4.
    Lit scenes: `--mood night`; framing: `--focus x,y,z --zoom N`; camera moves: `--frames 300 --yaw-to ... --zoom-to ...`,
    plus `--audio file.wav`. Blender writes only inside your home directory if it's the flatpak.
@@ -98,6 +99,7 @@ Full API: [reference.md](reference.md).
 
 ## Habits that make better low-poly assets
 
+- `bevel` on `box`/`cyl` (5–15% of the smallest side) gives chunky, toy-like edges that catch light; use it on most hard-surface parts.
 - Shape language first: a few big primitives that read at a glance, then 2–3 detail parts.
 - Low counts: 6–8 sides for trunks and rocks, `detail: 1` spheres; props 50–800 tris, characters
   under 1k. `jitter` (0.02–0.08) makes primitives feel hand-made.

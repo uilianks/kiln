@@ -59,8 +59,8 @@ The last argument is a material key, or an options object with `mat` plus:
 
 | Shape | Origin | Options |
 |---|---|---|
-| `box(w, h, d)` | base center | |
-| `cyl(r, h)` | base center | `sides` (8), `top` (top radius: tapers) |
+| `box(w, h, d)` | base center | `bevel`: chamfer every edge and corner by this distance (26 faces): the soft, chunky stylised look. |
+| `cyl(r, h)` | base center | `sides` (8), `top` (top radius: tapers), `bevel` (chamfer both rims) |
 | `cone(r, h)` | base center | `sides` (8) |
 | `sphere(r)` | center | `detail` 0–4 (1) |
 | `rock(r)` | center | `detail` (1), `rough` (0.22), `squash` (0.75), `seed` |
@@ -146,6 +146,7 @@ Clips export as glTF animations (one sample per frame, linear). `kiln build` wri
 | Path | Content |
 |---|---|
 | `out/models/<name>.glb` | glTF 2.0 binary: one node, one primitive per material, flat normals, PBR materials. |
+| `out/models/<name>.glb` with `--rig` | Models that use `part()` export as a **skinned skeleton**: one mesh weighted 100% per bone (rigid skinning), one bone per part (named after it) plus a `root` bone for the static body, inverse bind matrices, and the `animate()` clips targeting the bones. Godot imports it as `Skeleton3D` + `AnimationPlayer`; Blender / Unity as an armature. Models without parts are unchanged. Packs are not rigged. |
 | `out/models/<name>.stl` | `--stl`: binary STL (triangles + normals, no materials) for 3D printing and CAD. |
 | `out/<pack>.glb` | One node per model, laid out in rows. Engines import it as a library of named meshes. |
 | `out/_preview/<name>.png` | Hero / front / right / top views, dimensions, triangle count, grid spacing, materials. |

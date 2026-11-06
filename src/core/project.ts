@@ -56,7 +56,7 @@ export interface Built {
 const MODEL_OPTS = ["pivot", "base", "swap", "scale"];
 const PLACE = ["pos", "rot", "scale"];
 const SHAPE_OPTS: Record<string, string[]> = {
-  box: [], cyl: ["sides", "top"], cone: ["sides"], sphere: ["detail"], rock: ["detail", "rough", "squash", "seed"],
+  box: ["bevel"], cyl: ["sides", "top", "bevel"], cone: ["sides"], sphere: ["detail"], rock: ["detail", "rough", "squash", "seed"],
   lathe: ["sides"], extrude: [], prism: [], wedge: [], voxels: ["size"], voxfn: ["size"],
   torus: ["sides", "rings"], tube: ["sides", "closed"], terrain: ["res", "height", "fn", "heightmap"],
   voximg: ["size", "depth", "alpha", "flat"],
@@ -201,8 +201,13 @@ export class Project {
       this.order.push(name);
     });
 
-    env.box = (w: unknown, h: unknown, d: unknown, s: unknown) => geo("box", [w, h, d, s], (m) => box(num(w, "w", 1e-9), num(h, "h", 1e-9), num(d, "d", 1e-9), m));
-    env.cyl = (r: unknown, h: unknown, s: unknown) => geo("cyl", [r, h, s], (m, o) => cyl(num(r, "r", 1e-9), num(h, "h", 1e-9), Number(o.sides ?? 8), Number(o.top ?? r), m));
+    env.box = (w: unknown, h: unknown, d: unknown, s: unknown) => geo("box", [w, h, d, s], (m, o) => box(num(w, "w", 1e-9), num(h, "h", 1e-9), num(d, "d", 1e-9), m, Number(o.bevel ?? 0)));
+    env.cyl = (r: unknown, h: unknown, s: unknown) => geo("cyl", [r, h, s], (m, o) => {
+      const R = num(r, "r", 1e-9), H = num(h, "h", 1e-9), T = Number(o.top ?? r), sides = Number(o.sides ?? 8);
+      // bevel: chamfer both rims through a lathe profile (the cylinder's own ring layout)
+      const b = Math.min(Number(o.bevel ?? 0), R - 1e-4, H / 2 - 1e-4, T > 0 ? T - 1e-4 : Infinity);
+      return b > 0 ? lathe([[0, 0], [R - b, 0], [R, b], [T, H - b], [T - b, H], [0, H]], sides, m) : cyl(R, H, sides, T, m);
+    });
     env.cone = (r: unknown, h: unknown, s: unknown) => geo("cone", [r, h, s], (m, o) => cyl(num(r, "r", 1e-9), num(h, "h", 1e-9), Number(o.sides ?? 8), 0, m));
     env.sphere = (r: unknown, s: unknown) => geo("sphere", [r, s], (m, o) => sphere(num(r, "r", 1e-9), Number(o.detail ?? 1), m));
     env.rock = (r: unknown, s: unknown) => geo("rock", [r, s], (m, o) =>

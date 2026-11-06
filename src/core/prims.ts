@@ -4,7 +4,9 @@ import { KilnError } from "./errors.ts";
 import { type Face, earClip, faceNormal, orient } from "./mesh.ts";
 import { type V3, add, cross, dot, len, norm, rng, scl, sub } from "./util.ts";
 
-export function box(w: number, h: number, d: number, mat: string): Face[] {
+export function box(w: number, h: number, d: number, mat: string, bevel = 0): Face[] {
+  const b = Math.min(bevel, w / 2 - 1e-4, h / 2 - 1e-4, d / 2 - 1e-4);
+  if (b > 0) return chamferBox(w, h, d, b, mat);
   const x = w / 2, z = d / 2;
   const c: V3 = [0, h / 2, 0];
   const quads: V3[][] = [
@@ -13,6 +15,23 @@ export function box(w: number, h: number, d: number, mat: string): Face[] {
     [[-x, h, z], [x, h, z], [x, h, -z], [-x, h, -z]], [[-x, 0, -z], [x, 0, -z], [x, 0, z], [-x, 0, z]],
   ];
   return quads.map((v) => ({ v: orient(v, sub(centroid(v), c)), mat }));
+}
+
+/** Box with every edge and corner cut at 45° by `b` (6 faces + 12 edge strips + 8 corner triangles): the soft, chunky look. */
+function chamferBox(w: number, h: number, d: number, b: number, mat: string): Face[] {
+  const X = w / 2, Y = h / 2, Z = d / 2, x = X - b, y = Y - b, z = Z - b;
+  const loops: V3[][] = [];
+  const S = [-1, 1], ring4: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  for (const s of S) {
+    loops.push(ring4.map(([a, c]) => [s * X, a * y, c * z] as V3), ring4.map(([a, c]) => [a * x, s * Y, c * z] as V3), ring4.map(([a, c]) => [a * x, c * y, s * Z] as V3));
+    for (const t of S) {
+      loops.push([[s * X, t * y, -z], [s * X, t * y, z], [s * x, t * Y, z], [s * x, t * Y, -z]]);   // X-Y edge
+      loops.push([[s * X, -y, t * z], [s * X, y, t * z], [s * x, y, t * Z], [s * x, -y, t * Z]]);   // X-Z edge
+      loops.push([[-x, s * Y, t * z], [x, s * Y, t * z], [x, s * y, t * Z], [-x, s * y, t * Z]]);   // Y-Z edge
+      for (const u of S) loops.push([[s * X, t * y, u * z], [s * x, t * Y, u * z], [s * x, t * y, u * Z]]);
+    }
+  }
+  return loops.map((v) => { const m = v.map((p) => [p[0], p[1] + Y, p[2]] as V3); return { v: orient(m, centroid(v)), mat }; });
 }
 
 function centroid(v: V3[]): V3 {

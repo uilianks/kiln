@@ -18,6 +18,8 @@ export interface OutputOptions {
   turntable?: boolean;
   /** Also write a binary STL per model to out/models (3D printing, CAD). */
   stl?: boolean;
+  /** Export animatable parts as a skinned skeleton (bones + skin) so engines get a Skeleton3D / armature. */
+  rig?: boolean;
 }
 
 export interface OutputResult {
@@ -89,7 +91,7 @@ export function writeOutputs(p: Project, out: string, opts: OutputOptions = {}):
     try {
       const b = p.build(name);
       const clips = p.clips.filter((c) => c.model === name);
-      write(join(out, "models", name + ".glb"), glb([{ name, faces: b.faces, pal: b.pal, lights: b.lights, joints: b.joints, clips }]));
+      write(join(out, "models", name + ".glb"), glb([{ name, faces: b.faces, pal: b.pal, lights: b.lights, joints: b.joints, clips, rig: opts.rig }]));
       if (opts.stl) write(join(out, "models", name + ".stl"), stl(b.faces, name));
       if (opts.preview !== false) {
         write(join(out, "_preview", name + ".png"), previewPng(b));
